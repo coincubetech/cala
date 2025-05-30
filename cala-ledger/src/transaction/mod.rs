@@ -3,7 +3,7 @@ pub mod error;
 mod entity;
 mod repo;
 use chrono::{DateTime, Utc};
-use cala_types::primitives::AccountId;
+use cala_types::primitives::{AccountId, AccountSetId, TransactionId};
 use es_entity::EsEntity;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -32,6 +32,13 @@ pub struct Transactions {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransactionsByAccountIdCursor {
     pub query_account_id: AccountId,
+    pub created_at: DateTime<Utc>,
+    pub transaction_id: TransactionId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransactionsByAccountSetIdCursor {
+    pub query_account_set_id: AccountSetId,
     pub created_at: DateTime<Utc>,
     pub transaction_id: TransactionId,
 }
@@ -105,6 +112,15 @@ impl Transactions {
         args: es_entity::PaginatedQueryArgs<TransactionsByAccountIdCursor>,
     ) -> Result<es_entity::PaginatedQueryRet<Transaction, TransactionsByAccountIdCursor>, TransactionError> {
         self.repo.find_by_account_id(account_id, args).await
+    }
+
+    #[instrument(name = "cala_ledger.transactions.find_by_account_set_id", skip(self), err)]
+    pub async fn find_by_account_set_id(
+        &self,
+        account_set_id: AccountSetId,
+        args: es_entity::PaginatedQueryArgs<TransactionsByAccountSetIdCursor>,
+    ) -> Result<es_entity::PaginatedQueryRet<Transaction, TransactionsByAccountSetIdCursor>, TransactionError> {
+        self.repo.find_by_account_set_id(account_set_id, args).await
     }
 
     #[cfg(feature = "import")]
@@ -213,3 +229,66 @@ impl CursorType for TransactionsByAccountIdCursor {
         )
     }
 }
+
+
+
+impl From<(&Transaction, AccountSetId)> for TransactionsByAccountSetIdCursor {
+    fn from((transaction, account_set_id): (&Transaction, AccountSetId)) -> Self {
+        Self {
+            query_account_set_id: account_set_id,
+            created_at: transaction.created_at(),
+            transaction_id: transaction.id(),
+        }
+    }
+}
+
+impl CursorType for TransactionsByAccountSetIdCursor {
+    type Error = String;
+
+    fn decode_cursor(s: &str) -> Result<Self, Self::Error> {
+        // Decode a cursor from a string representation
+        // Format: <account_set_id>:<created_at_timestamp>:<transaction_id>
+        let parts: Vec<&str> = s.split(':').collect();
+        if parts.len() != 3 {
+            return Err(format!("Invalid cursor format: {}", s));
+        }
+        
+        let account_set_id = parts[0].parse::<AccountSetId>()
+            .map_err(|e| format!("Invalid account set ID in cursor: {}", e))?;
+            
+        let created_at_nanos = parts[1].parse::<i64>()
+            .map_err(|e| format!("Invalid timestamp in cursor: {}", e))?;
+        
+        // Use non-deprecated functions from chrono
+        let seconds = created_at_nanos / 1_000_000_000;
+        let nanoseconds = (created_at_nanos % 1_000_000_000) as u32;
+        let datetime = chrono::DateTime::from_timestamp(seconds, nanoseconds)
+            .ok_or_else(|| format!("Invalid timestamp value: {}", created_at_nanos))?;
+        let created_at = datetime;
+        
+        let transaction_id = parts[2].parse::<TransactionId>()
+            .map_err(|e| format!("Invalid transaction ID in cursor: {}", e))?;
+            
+        Ok(Self {
+            query_account_set_id: account_set_id,
+            created_at,
+            transaction_id,
+        })
+    }
+
+    fn encode_cursor(&self) -> String {
+        // Encode the cursor as a string
+        // Format: <account_set_id>:<created_at_timestamp>:<transaction_id>
+        // Use non-deprecated function
+        let nanos = self.created_at.timestamp_nanos_opt()
+            .unwrap_or(0);
+            
+        format!(
+            "{}:{}:{}",
+            self.query_account_set_id,
+            nanos,
+            self.transaction_id
+        )
+    }
+}
+

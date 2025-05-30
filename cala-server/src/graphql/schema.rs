@@ -1,4 +1,6 @@
-use async_graphql::{dataloader::*, types::connection::*, *};
+use async_graphql::{dataloader::*, types::connection::*, *, Object, SimpleObject};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use serde_json::json;
 use cala_ledger::{balance::AccountBalance, primitives::*, tx_template::NewParamDefinition};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -10,13 +12,68 @@ use super::{
     tx_template::*, velocity::*,
 };
 
-use cala_ledger::transaction::TransactionsByAccountIdCursor;
+use cala_ledger::transaction::{TransactionsByAccountIdCursor, TransactionsByAccountSetIdCursor};
 
 pub type DbOp<'a> = Arc<Mutex<cala_ledger::LedgerOperation<'a>>>;
 
 #[derive(Default)]
 pub struct CoreQuery<E: QueryExtensionMarker> {
     _phantom: std::marker::PhantomData<E>,
+}
+
+
+
+
+
+// First, let's define a struct specifically for the transactions by account set ID query
+#[derive(SimpleObject)]
+#[graphql(name = "AccountSetTransactionConnection")]
+pub struct AccountSetTransactionConnection {
+    #[graphql(name = "edges")]
+    pub edges: Vec<AccountSetTransactionEdge>,
+    pub has_previous_page: bool,
+    pub has_next_page: bool,
+    pub start_cursor: Option<String>,
+    pub end_cursor: Option<String>,
+}
+
+// Define a custom edge type to avoid GraphQL name conflicts
+#[derive(SimpleObject)]
+#[graphql(name = "AccountSetTransactionEdge")]
+pub struct AccountSetTransactionEdge {
+    pub cursor: String,
+    pub node: Transaction,
+}
+
+// Encode cursor to base64 string for GraphQL pagination
+fn encode_cursor<T: serde::Serialize>(cursor: &T) -> String {
+    let json = json!(cursor).to_string();
+    BASE64.encode(json.as_bytes())
+}
+
+impl From<Connection<TransactionsByAccountSetIdCursor, Transaction, EmptyFields, EmptyFields>> for AccountSetTransactionConnection {
+    fn from(connection: Connection<TransactionsByAccountSetIdCursor, Transaction, EmptyFields, EmptyFields>) -> Self {
+        // Convert the async-graphql Edge objects to our custom edge type
+        let edges: Vec<AccountSetTransactionEdge> = connection.edges
+            .into_iter()
+            .map(|edge| AccountSetTransactionEdge {
+                cursor: encode_cursor(&edge.cursor),
+                node: edge.node,
+            })
+            .collect();
+        
+        // Extract first and last cursors for pagination
+        let start_cursor = edges.first().map(|edge| edge.cursor.clone());
+        let end_cursor = edges.last().map(|edge| edge.cursor.clone());
+        
+        Self {
+            edges,
+            has_previous_page: connection.has_previous_page,
+            has_next_page: connection.has_next_page,
+            start_cursor,
+            end_cursor,
+        }
+    }
 }
 
 #[Object(name = "Query")]
@@ -200,6 +257,64 @@ impl<E: QueryExtensionMarker> CoreQuery<E> {
     .await
 }
 
+    async fn transactions_by_account_set_id(
+        &self,
+        ctx: &Context<'_>,
+        account_set_id: UUID,
+        first: i32,
+        after: Option<String>,
+    ) -> async_graphql::Result<AccountSetTransactionConnection> {
+        let app = ctx.data_unchecked::<CalaApp>();
+        
+        // Decode the cursor if one was provided
+        let after_cursor = after.and_then(|encoded| {
+            let bytes = BASE64.decode(encoded.as_bytes()).ok()?;
+            let json = String::from_utf8(bytes).ok()?;
+            serde_json::from_str::<TransactionsByAccountSetIdCursor>(&json).ok()
+        });
+        
+        // Get transactions from the ledger with pagination
+        let result = app
+            .ledger()
+            .transactions()
+            .find_by_account_set_id(
+                AccountSetId::from(account_set_id),
+                cala_ledger::es_entity::PaginatedQueryArgs { 
+                    first: first as usize, 
+                    after: after_cursor 
+                },
+            )
+            .await?;
+        
+        // Create our custom edges
+        let edges: Vec<AccountSetTransactionEdge> = result.entities
+            .into_iter()
+            .map(|entity| {
+                let cursor = TransactionsByAccountSetIdCursor::from((&entity, AccountSetId::from(account_set_id)));
+                AccountSetTransactionEdge {
+                    cursor: encode_cursor(&cursor),
+                    node: Transaction::from(entity),
+                }
+            })
+            .collect();
+        
+        // Get the start and end cursors
+        let start_cursor = edges.first().map(|edge| edge.cursor.clone());
+        let end_cursor = edges.last().map(|edge| edge.cursor.clone());
+        
+        // Return our custom connection type
+        Ok(AccountSetTransactionConnection {
+            edges,
+            has_previous_page: false, // First page doesn't have previous
+            has_next_page: result.has_next_page,
+            start_cursor,
+            end_cursor,
+        })
+    }
+
+
+
+
     async fn tx_template(
         &self,
         ctx: &Context<'_>,
@@ -242,6 +357,8 @@ impl<E: QueryExtensionMarker> CoreQuery<E> {
         Ok(loader.load_one(VelocityControlId::from(id)).await?)
     }
 }
+
+
 
 #[derive(Default)]
 pub struct CoreMutation<E: MutationExtensionMarker> {

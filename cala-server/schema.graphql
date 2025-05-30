@@ -406,6 +406,7 @@ type Query {
 	balance(journalId: UUID!, accountId: UUID!, currency: CurrencyCode!): Balance
 	transaction(id: UUID!): Transaction
 	transactionsByAccountId(accountId: UUID!, first: Int!, after: String): TransactionConnection!
+	transactionsByAccountSetId(accountSetId: UUID!, first: Int!, after: String): TransactionConnection!
 	transactionByExternalId(externalId: String!): Transaction
 	txTemplate(id: UUID!): TxTemplate
 	txTemplateByCode(code: String!): TxTemplate
