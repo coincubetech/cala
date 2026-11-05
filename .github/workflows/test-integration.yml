@@ -2,10 +2,21 @@ name: "Integration Tests"
 
 on:
   pull_request:
-    branches: [main]
+    branches:
+      - main
+      - redesign
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+      - edited
+      - converted_to_draft
+  workflow_dispatch:
 
 jobs:
   integration:
+    if: ${{ (github.event_name != 'pull_request' || (!github.event.pull_request.draft && (github.event.action != 'edited' || github.event.changes.base != null))) }}
     name: Integration Test
     runs-on: ubuntu-latest
     steps:
@@ -19,3 +30,6 @@ jobs:
       - name: Run integration tests
         run: nix develop -c make test-in-ci
 
+concurrency:
+  group: batch-${{ github.workflow }}-${{ github.ref }}-${{ github.event.action == 'edited' && github.event.changes.base == null && github.run_id || 'candidate' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}

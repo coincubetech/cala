@@ -5,13 +5,27 @@ name: Audit
 
 on:
   pull_request:
-    branches: [ main ]
+    branches:
+      - main
+      - redesign
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+      - edited
+      - converted_to_draft
+  workflow_dispatch:
 
 jobs:
   security_audit:
+    if: ${{ (github.event_name != 'pull_request' || (!github.event.pull_request.draft && (github.event.action != 'edited' || github.event.changes.base != null))) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
       - uses: actions-rs/audit-check@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+concurrency:
+  group: batch-${{ github.workflow }}-${{ github.ref }}-${{ github.event.action == 'edited' && github.event.changes.base == null && github.run_id || 'candidate' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
